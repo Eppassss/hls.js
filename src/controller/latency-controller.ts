@@ -47,11 +47,8 @@ export default class LatencyController implements ComponentAPI {
       return null;
     }
     const { holdBack, partHoldBack, targetduration } = levelDetails;
-    const {
-      liveSyncDuration,
-      liveSyncDurationCount,
-      lowLatencyMode,
-    } = this.config;
+    const { liveSyncDuration, liveSyncDurationCount, lowLatencyMode } =
+      this.config;
     const userConfig = this.hls.userConfig;
     let targetLatency = lowLatencyMode ? partHoldBack || holdBack : holdBack;
     if (
@@ -92,6 +89,14 @@ export default class LatencyController implements ComponentAPI {
     return Math.min(Math.max(min, syncPosition), max);
   }
 
+  get drift(): number {
+    const { levelDetails } = this;
+    if (levelDetails === null) {
+      return 1;
+    }
+    return levelDetails.drift;
+  }
+
   get edgeStalled(): number {
     const { levelDetails } = this;
     if (levelDetails === null) {
@@ -109,9 +114,11 @@ export default class LatencyController implements ComponentAPI {
       return 0;
     }
     const bufferedRanges = media.buffered.length;
-    return bufferedRanges
-      ? media.buffered.end(bufferedRanges - 1)
-      : levelDetails.edge - this.currentTime;
+    return (
+      (bufferedRanges
+        ? media.buffered.end(bufferedRanges - 1)
+        : levelDetails.edge) - this.currentTime
+    );
   }
 
   public destroy(): void {

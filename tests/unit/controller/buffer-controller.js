@@ -169,6 +169,7 @@ describe('BufferController tests', function () {
       bufferController.onMediaAttaching(Events.MEDIA_ATTACHING, {
         media: video,
       });
+      sandbox.stub(bufferController.mediaSource, 'addSourceBuffer');
 
       hls.on(Hls.Events.BUFFER_CREATED, (event, data) => {
         const tracks = data.tracks;
@@ -177,7 +178,20 @@ describe('BufferController tests', function () {
         done();
       });
 
-      bufferController.pendingTracks = { video: { codec: 'testing' } };
+      hls.once(Hls.Events.ERROR, (event, data) => {
+        // Async timeout prevents assertion from throwing in event handler
+        self.setTimeout(() => {
+          expect(data.error.message).to.equal(null);
+          done();
+        });
+      });
+
+      bufferController.pendingTracks = {
+        video: {
+          container: 'video/mp4',
+          codec: 'avc1.42e01e',
+        },
+      };
       bufferController.checkPendingTracks();
 
       video = null;
@@ -263,6 +277,73 @@ describe('BufferController tests', function () {
 
       expect(createSbStub).to.have.been.calledOnce;
       expect(createSbStub).to.have.been.calledWith({ audio: {}, video: {} });
+    });
+  });
+
+  describe('onBufferCodecs', function () {
+    it('calls changeType if needed and stores current track info', function () {
+      const getSourceBufferTypes = sandbox
+        .stub(bufferController, 'getSourceBufferTypes')
+        .returns(['audio', 'video']);
+      /* eslint-disable-next-line no-unused-vars */
+      const appendChangeType = sandbox.stub(
+        bufferController,
+        'appendChangeType'
+      );
+      const buffer = {
+        changeType: sandbox.stub(),
+      };
+      const originalAudioTrack = {
+        id: 'main',
+        codec: 'mp4a.40.2',
+        levelCodec: undefined,
+        container: 'audio/mp4',
+        metadata: {
+          channelCount: 1,
+        },
+      };
+      const newAudioTrack = {
+        id: 'main',
+        codec: 'mp4a.40.5',
+        levelCodec: undefined,
+        container: 'audio/mp4',
+        metadata: {
+          channelCount: 1,
+        },
+      };
+      bufferController.tracks = {
+        audio: {
+          ...originalAudioTrack,
+          buffer,
+        },
+      };
+      bufferController.onBufferCodecs(Events.BUFFER_CODECS, {
+        audio: newAudioTrack,
+      });
+      expect(getSourceBufferTypes).to.have.been.calledOnce;
+      expect(bufferController.appendChangeType).to.have.been.calledOnce;
+      expect(bufferController.appendChangeType).to.have.been.calledWith(
+        'audio',
+        'audio/mp4;codecs=mp4a.40.5'
+      );
+      expect(bufferController.tracks.audio).to.deep.equal({
+        buffer,
+        ...newAudioTrack,
+      });
+
+      bufferController.onBufferCodecs(Events.BUFFER_CODECS, {
+        audio: originalAudioTrack,
+      });
+      expect(getSourceBufferTypes).to.have.been.calledTwice;
+      expect(bufferController.appendChangeType).to.have.been.calledTwice;
+      expect(bufferController.appendChangeType).to.have.been.calledWith(
+        'audio',
+        'audio/mp4;codecs=mp4a.40.2'
+      );
+      expect(bufferController.tracks.audio).to.deep.equal({
+        buffer,
+        ...originalAudioTrack,
+      });
     });
   });
 });

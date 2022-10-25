@@ -7,8 +7,8 @@ import { logger } from '../utils/logger';
 import { Fragment, Part } from '../loader/fragment';
 import { LevelDetails } from '../loader/level-details';
 import type { Level } from '../types/level';
-import type { LoaderStats } from '../types/loader';
 import type { MediaPlaylist } from '../types/media-playlist';
+import { DateRange } from '../loader/date-range';
 
 type FragmentIntersection = (oldFrag: Fragment, newFrag: Fragment) => void;
 type PartIntersection = (oldPart: Part, newPart: Part) => void;
@@ -165,9 +165,15 @@ export function mergeDetails(
   oldDetails: LevelDetails,
   newDetails: LevelDetails
 ): void {
-  // potentially retrieve cached initsegment
-  if (newDetails.initSegment && oldDetails.initSegment) {
-    newDetails.initSegment = oldDetails.initSegment;
+  // Track the last initSegment processed. Initialize it to the last one on the timeline.
+  let currentInitSegment: Fragment | null = null;
+  const oldFragments = oldDetails.fragments;
+  for (let i = oldFragments.length - 1; i >= 0; i--) {
+    const oldInit = oldFragments[i].initSegment;
+    if (oldInit) {
+      currentInitSegment = oldInit;
+      break;
+    }
   }
 
   if (oldDetails.fragmentHint) {
@@ -214,8 +220,26 @@ export function mergeDetails(
       newFrag.loader = oldFrag.loader;
       newFrag.stats = oldFrag.stats;
       newFrag.urlId = oldFrag.urlId;
+      if (oldFrag.initSegment) {
+        newFrag.initSegment = oldFrag.initSegment;
+        currentInitSegment = oldFrag.initSegment;
+      }
     }
   );
+
+  if (currentInitSegment) {
+    const fragmentsToCheck = newDetails.fragmentHint
+      ? newDetails.fragments.concat(newDetails.fragmentHint)
+      : newDetails.fragments;
+    fragmentsToCheck.forEach((frag) => {
+      if (
+        !frag.initSegment ||
+        frag.initSegment.relurl === currentInitSegment?.relurl
+      ) {
+        frag.initSegment = currentInitSegment;
+      }
+    });
+  }
 
   if (newDetails.skippedSegments) {
     newDetails.deltaUpdateFailed = newDetails.fragments.some((frag) => !frag);
@@ -228,6 +252,12 @@ export function mergeDetails(
       }
       newDetails.startSN = newDetails.fragments[0].sn as number;
       newDetails.startCC = newDetails.fragments[0].cc;
+    } else if (newDetails.canSkipDateRanges) {
+      newDetails.dateRanges = mergeDateRanges(
+        oldDetails.dateRanges,
+        newDetails.dateRanges,
+        newDetails.recentlyRemovedDateranges
+      );
     }
   }
 
@@ -239,9 +269,6 @@ export function mergeDetails(
     }
   }
   if (newDetails.skippedSegments) {
-    if (!newDetails.initSegment) {
-      newDetails.initSegment = oldDetails.initSegment;
-    }
     newDetails.startCC = newDetails.fragments[0].cc;
   }
 
@@ -275,6 +302,49 @@ export function mergeDetails(
   if (newFragments.length) {
     newDetails.totalduration = newDetails.edge - newFragments[0].start;
   }
+
+  newDetails.driftStartTime = oldDetails.driftStartTime;
+  newDetails.driftStart = oldDetails.driftStart;
+  const advancedDateTime = newDetails.advancedDateTime;
+  if (newDetails.advanced && advancedDateTime) {
+    const edge = newDetails.edge;
+    if (!newDetails.driftStart) {
+      newDetails.driftStartTime = advancedDateTime;
+      newDetails.driftStart = edge;
+    }
+    newDetails.driftEndTime = advancedDateTime;
+    newDetails.driftEnd = edge;
+  } else {
+    newDetails.driftEndTime = oldDetails.driftEndTime;
+    newDetails.driftEnd = oldDetails.driftEnd;
+    newDetails.advancedDateTime = oldDetails.advancedDateTime;
+  }
+}
+
+function mergeDateRanges(
+  oldDateRanges: Record<string, DateRange>,
+  deltaDateRanges: Record<string, DateRange>,
+  recentlyRemovedDateranges: string[] | undefined
+): Record<string, DateRange> {
+  const dateRanges = Object.assign({}, oldDateRanges);
+  if (recentlyRemovedDateranges) {
+    recentlyRemovedDateranges.forEach((id) => {
+      delete dateRanges[id];
+    });
+  }
+  Object.keys(deltaDateRanges).forEach((id) => {
+    const dateRange = new DateRange(deltaDateRanges[id].attr, dateRanges[id]);
+    if (dateRange.isValid) {
+      dateRanges[id] = dateRange;
+    } else {
+      logger.warn(
+        `Ignoring invalid Playlist Delta Update DATERANGE tag: "${JSON.stringify(
+          deltaDateRanges[id].attr
+        )}"`
+      );
+    }
+  });
+  return dateRanges;
 }
 
 export function mapPartIntersection(
@@ -343,81 +413,60 @@ export function adjustSliding(
   const delta =
     newDetails.startSN + newDetails.skippedSegments - oldDetails.startSN;
   const oldFragments = oldDetails.fragments;
-  const newFragments = newDetails.fragments;
   if (delta < 0 || delta >= oldFragments.length) {
     return;
   }
-  const playlistStartOffset = oldFragments[delta].start;
-  if (playlistStartOffset) {
-    for (let i = newDetails.skippedSegments; i < newFragments.length; i++) {
-      newFragments[i].start += playlistStartOffset;
+  addSliding(newDetails, oldFragments[delta].start);
+}
+
+export function addSliding(details: LevelDetails, start: number) {
+  if (start) {
+    const fragments = details.fragments;
+    for (let i = details.skippedSegments; i < fragments.length; i++) {
+      fragments[i].start += start;
     }
-    if (newDetails.fragmentHint) {
-      newDetails.fragmentHint.start += playlistStartOffset;
+    if (details.fragmentHint) {
+      details.fragmentHint.start += start;
     }
   }
 }
 
 export function computeReloadInterval(
   newDetails: LevelDetails,
-  stats: LoaderStats
+  distanceToLiveEdgeMs: number = Infinity
 ): number {
-  const reloadInterval = 1000 * newDetails.levelTargetDuration;
-  const reloadIntervalAfterMiss = reloadInterval / 2;
-  const timeSinceLastModified = newDetails.age;
-  const useLastModified =
-    timeSinceLastModified > 0 && timeSinceLastModified < reloadInterval * 3;
-  const roundTrip = stats.loading.end - stats.loading.start;
+  let reloadInterval = 1000 * newDetails.targetduration;
 
-  let estimatedTimeUntilUpdate;
-  let availabilityDelay = newDetails.availabilityDelay;
-  // let estimate = 'average';
-
-  if (newDetails.updated === false) {
-    if (useLastModified) {
-      // estimate = 'miss round trip';
-      // We should have had a hit so try again in the time it takes to get a response,
-      // but no less than 1/3 second.
-      const minRetry = 333 * newDetails.misses;
-      estimatedTimeUntilUpdate = Math.max(
-        Math.min(reloadIntervalAfterMiss, roundTrip * 2),
-        minRetry
-      );
-      newDetails.availabilityDelay =
-        (newDetails.availabilityDelay || 0) + estimatedTimeUntilUpdate;
-    } else {
-      // estimate = 'miss half average';
-      // follow HLS Spec, If the client reloads a Playlist file and finds that it has not
-      // changed then it MUST wait for a period of one-half the target
-      // duration before retrying.
-      estimatedTimeUntilUpdate = reloadIntervalAfterMiss;
+  if (newDetails.updated) {
+    // Use last segment duration when shorter than target duration and near live edge
+    const fragments = newDetails.fragments;
+    const liveEdgeMaxTargetDurations = 4;
+    if (
+      fragments.length &&
+      reloadInterval * liveEdgeMaxTargetDurations > distanceToLiveEdgeMs
+    ) {
+      const lastSegmentDuration =
+        fragments[fragments.length - 1].duration * 1000;
+      if (lastSegmentDuration < reloadInterval) {
+        reloadInterval = lastSegmentDuration;
+      }
     }
-  } else if (useLastModified) {
-    // estimate = 'next modified date';
-    // Get the closest we've been to timeSinceLastModified on update
-    availabilityDelay = Math.min(
-      availabilityDelay || reloadInterval / 2,
-      timeSinceLastModified
-    );
-    newDetails.availabilityDelay = availabilityDelay;
-    estimatedTimeUntilUpdate =
-      availabilityDelay + reloadInterval - timeSinceLastModified;
   } else {
-    estimatedTimeUntilUpdate = reloadInterval - roundTrip;
+    // estimate = 'miss half average';
+    // follow HLS Spec, If the client reloads a Playlist file and finds that it has not
+    // changed then it MUST wait for a period of one-half the target
+    // duration before retrying.
+    reloadInterval /= 2;
   }
 
-  // console.log(`[computeReloadInterval] live reload ${newDetails.updated ? 'REFRESHED' : 'MISSED'}`,
-  //   '\n  method', estimate,
-  //   '\n  estimated time until update =>', estimatedTimeUntilUpdate,
-  //   '\n  average target duration', reloadInterval,
-  //   '\n  time since modified', timeSinceLastModified,
-  //   '\n  time round trip', roundTrip,
-  //   '\n  availability delay', availabilityDelay);
-
-  return Math.round(estimatedTimeUntilUpdate);
+  return Math.round(reloadInterval);
 }
 
-export function getFragmentWithSN(level: Level, sn: number): Fragment | null {
+export function getFragmentWithSN(
+  level: Level,
+  sn: number,
+  fragCurrent: Fragment | null
+): Fragment | null {
   if (!level || !level.details) {
     return null;
   }
@@ -430,6 +479,9 @@ export function getFragmentWithSN(level: Level, sn: number): Fragment | null {
   fragment = levelDetails.fragmentHint;
   if (fragment && fragment.sn === sn) {
     return fragment;
+  }
+  if (sn < levelDetails.startSN && fragCurrent && fragCurrent.sn === sn) {
+    return fragCurrent;
   }
   return null;
 }

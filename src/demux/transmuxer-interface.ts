@@ -14,6 +14,7 @@ import type { ChunkMetadata, TransmuxerResult } from '../types/transmuxer';
 import type Hls from '../hls';
 import type { HlsEventEmitter } from '../events';
 import type { PlaylistLevelType } from '../types/loader';
+import type { TypeSupported } from './tsdemuxer';
 
 const MediaSource = getMediaSource() || { isTypeSupported: () => false };
 
@@ -54,7 +55,7 @@ export default class TransmuxerInterface {
     this.observer.on(Events.FRAG_DECRYPTED, forwardMessage);
     this.observer.on(Events.ERROR, forwardMessage);
 
-    const typeSupported = {
+    const typeSupported: TypeSupported = {
       mp4: MediaSource.isTypeSupported('video/mp4'),
       mpeg: MediaSource.isTypeSupported('audio/mpeg'),
       mp3: MediaSource.isTypeSupported('audio/mp4; codecs="mp3"'),
@@ -77,15 +78,9 @@ export default class TransmuxerInterface {
             details: ErrorDetails.INTERNAL_EXCEPTION,
             fatal: true,
             event: 'demuxerWorker',
-            err: {
-              message:
-                event.message +
-                ' (' +
-                event.filename +
-                ':' +
-                event.lineno +
-                ')',
-            },
+            error: new Error(
+              `${event.message}  (${event.filename}:${event.lineno})`
+            ),
           });
         };
         worker.postMessage({
@@ -108,7 +103,8 @@ export default class TransmuxerInterface {
           this.observer,
           typeSupported,
           config,
-          vendor
+          vendor,
+          id
         );
         this.worker = null;
       }
@@ -117,7 +113,8 @@ export default class TransmuxerInterface {
         this.observer,
         typeSupported,
         config,
-        vendor
+        vendor,
+        id
       );
     }
   }
@@ -128,6 +125,7 @@ export default class TransmuxerInterface {
       w.removeEventListener('message', this.onwmsg);
       w.terminate();
       this.worker = null;
+      this.onwmsg = undefined;
     } else {
       const transmuxer = this.transmuxer;
       if (transmuxer) {
@@ -139,8 +137,11 @@ export default class TransmuxerInterface {
     if (observer) {
       observer.removeAllListeners();
     }
+    this.frag = null;
     // @ts-ignore
     this.observer = null;
+    // @ts-ignore
+    this.hls = null;
   }
 
   push(
@@ -164,9 +165,15 @@ export default class TransmuxerInterface {
     const discontinuity = !(lastFrag && frag.cc === lastFrag.cc);
     const trackSwitch = !(lastFrag && chunkMeta.level === lastFrag.level);
     const snDiff = lastFrag ? chunkMeta.sn - (lastFrag.sn as number) : -1;
-    const partDiff = this.part ? chunkMeta.part - this.part.index : 1;
+    const partDiff = this.part ? chunkMeta.part - this.part.index : -1;
+    const progressive =
+      snDiff === 0 &&
+      chunkMeta.id > 1 &&
+      chunkMeta.id === lastFrag?.stats.chunkCount;
     const contiguous =
-      !trackSwitch && (snDiff === 1 || (snDiff === 0 && partDiff === 1));
+      !trackSwitch &&
+      (snDiff === 1 ||
+        (snDiff === 0 && (partDiff === 1 || (progressive && partDiff <= 0))));
     const now = self.performance.now();
 
     if (trackSwitch || snDiff || frag.stats.parsing.start === 0) {
@@ -175,20 +182,25 @@ export default class TransmuxerInterface {
     if (part && (partDiff || !contiguous)) {
       part.stats.parsing.start = now;
     }
+    const initSegmentChange = !(
+      lastFrag && frag.initSegment?.url === lastFrag.initSegment?.url
+    );
     const state = new TransmuxState(
       discontinuity,
       contiguous,
       accurateTimeOffset,
       trackSwitch,
-      timeOffset
+      timeOffset,
+      initSegmentChange
     );
-    if (!contiguous || discontinuity) {
+    if (!contiguous || discontinuity || initSegmentChange) {
       logger.log(`[transmuxer-interface, ${frag.type}]: Starting new transmux session for sn: ${chunkMeta.sn} p: ${chunkMeta.part} level: ${chunkMeta.level} id: ${chunkMeta.id}
         discontinuity: ${discontinuity}
         trackSwitch: ${trackSwitch}
         contiguous: ${contiguous}
         accurateTimeOffset: ${accurateTimeOffset}
-        timeOffset: ${timeOffset}`);
+        timeOffset: ${timeOffset}
+        initSegmentChange: ${initSegmentChange}`);
       const config = new TransmuxConfig(
         audioCodec,
         videoCodec,
@@ -284,6 +296,13 @@ export default class TransmuxerInterface {
         this.onFlush(data.data);
         break;
       }
+
+      // pass logs from the worker thread to the main logger
+      case 'workerLog':
+        if (logger[data.data.logType]) {
+          logger[data.data.logType](data.data.message);
+        }
+        break;
 
       /* falls through */
       default: {

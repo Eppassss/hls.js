@@ -1,32 +1,30 @@
 import * as URLToolkit from 'url-toolkit';
-
-import { ErrorTypes, ErrorDetails } from './errors';
-
 import PlaylistLoader from './loader/playlist-loader';
-import KeyLoader from './loader/key-loader';
-
+import ID3TrackController from './controller/id3-track-controller';
+import LatencyController from './controller/latency-controller';
+import LevelController from './controller/level-controller';
 import { FragmentTracker } from './controller/fragment-tracker';
 import StreamController from './controller/stream-controller';
-import LevelController from './controller/level-controller';
-
 import { isSupported } from './is-supported';
 import { logger, enableLogs } from './utils/logger';
 import { enableStreamingMode, hlsDefaultConfig, mergeConfig } from './config';
-import type { HlsConfig } from './config';
-import { Events } from './events';
 import { EventEmitter } from 'eventemitter3';
-import { Level } from './types/level';
-import type { MediaPlaylist } from './types/media-playlist';
-import AudioTrackController from './controller/audio-track-controller';
-import SubtitleTrackController from './controller/subtitle-track-controller';
-import ID3TrackController from './controller/id3-track-controller';
-import EMEController from './controller/eme-controller';
-import CapLevelController from './controller/cap-level-controller';
-import AbrController from './controller/abr-controller';
-import LatencyController from './controller/latency-controller';
-import { ComponentAPI, NetworkComponentAPI } from './types/component-api';
+import { Events } from './events';
+import { ErrorTypes, ErrorDetails } from './errors';
 import type { HlsEventEmitter, HlsListeners } from './events';
-import { Fragment } from './loader/fragment';
+import type AudioTrackController from './controller/audio-track-controller';
+import type AbrController from './controller/abr-controller';
+import type BufferController from './controller/buffer-controller';
+import type CapLevelController from './controller/cap-level-controller';
+import type CMCDController from './controller/cmcd-controller';
+import type EMEController from './controller/eme-controller';
+import type SubtitleTrackController from './controller/subtitle-track-controller';
+import type { ComponentAPI, NetworkComponentAPI } from './types/component-api';
+import type { MediaPlaylist } from './types/media-playlist';
+import type { HlsConfig } from './config';
+import type { Level } from './types/level';
+import type { Fragment } from './loader/fragment';
+import { BufferInfo } from './utils/buffer-helper';
 
 /**
  * @module Hls
@@ -45,6 +43,7 @@ export default class Hls implements HlsEventEmitter {
   private _emitter: HlsEventEmitter = new EventEmitter();
   private _autoLevelCapping: number;
   private abrController: AbrController;
+  private bufferController: BufferController;
   private capLevelController: CapLevelController;
   private latencyController: LatencyController;
   private levelController: LevelController;
@@ -52,6 +51,7 @@ export default class Hls implements HlsEventEmitter {
   private audioTrackController: AudioTrackController;
   private subtitleTrackController: SubtitleTrackController;
   private emeController: EMEController;
+  private cmcdController: CMCDController;
 
   private _media: HTMLMediaElement | null = null;
   private url: string | null = null;
@@ -109,14 +109,20 @@ export default class Hls implements HlsEventEmitter {
     }
 
     // core controllers and network loaders
-    const abrController = (this.abrController = new config.abrController(this)); // eslint-disable-line new-cap
-    const bufferController = new config.bufferController(this); // eslint-disable-line new-cap
-    const capLevelController = (this.capLevelController = new config.capLevelController(
-      this
-    )); // eslint-disable-line new-cap
-    const fpsController = new config.fpsController(this); // eslint-disable-line new-cap
+    const {
+      abrController: ConfigAbrController,
+      bufferController: ConfigBufferController,
+      capLevelController: ConfigCapLevelController,
+      fpsController: ConfigFpsController,
+    } = config;
+    const abrController = (this.abrController = new ConfigAbrController(this));
+    const bufferController = (this.bufferController =
+      new ConfigBufferController(this));
+    const capLevelController = (this.capLevelController =
+      new ConfigCapLevelController(this));
+
+    const fpsController = new ConfigFpsController(this);
     const playListLoader = new PlaylistLoader(this);
-    const keyLoader = new KeyLoader(this);
     const id3TrackController = new ID3TrackController(this);
 
     // network controllers
@@ -133,12 +139,14 @@ export default class Hls implements HlsEventEmitter {
     // fpsController uses streamController to switch when frames are being dropped
     fpsController.setStreamController(streamController);
 
-    const networkControllers = [levelController, streamController];
+    const networkControllers = [
+      playListLoader,
+      levelController,
+      streamController,
+    ];
 
     this.networkControllers = networkControllers;
     const coreComponents = [
-      playListLoader,
-      keyLoader,
       abrController,
       bufferController,
       capLevelController,
@@ -171,6 +179,11 @@ export default class Hls implements HlsEventEmitter {
     this.createController(config.timelineController, null, coreComponents);
     this.emeController = this.createController(
       config.emeController,
+      null,
+      coreComponents
+    );
+    this.cmcdController = this.createController(
+      config.cmcdController,
       null,
       coreComponents
     );
@@ -282,16 +295,12 @@ export default class Hls implements HlsEventEmitter {
     this.removeAllListeners();
     this._autoLevelCapping = -1;
     this.url = null;
-    if (this.networkControllers) {
-      this.networkControllers.forEach((component) => component.destroy());
-      // @ts-ignore
-      this.networkControllers = null;
-    }
-    if (this.coreComponents) {
-      this.coreComponents.forEach((component) => component.destroy());
-      // @ts-ignore
-      this.coreComponents = null;
-    }
+
+    this.networkControllers.forEach((component) => component.destroy());
+    this.networkControllers.length = 0;
+
+    this.coreComponents.forEach((component) => component.destroy());
+    this.coreComponents.length = 0;
   }
 
   /**
@@ -320,15 +329,24 @@ export default class Hls implements HlsEventEmitter {
   loadSource(url: string) {
     this.stopLoad();
     const media = this.media;
-    if (media && this.url) {
+    const loadedSource = this.url;
+    const loadingSource = (this.url = URLToolkit.buildAbsoluteURL(
+      self.location.href,
+      url,
+      {
+        alwaysNormalize: true,
+      }
+    ));
+    logger.log(`loadSource:${loadingSource}`);
+    if (
+      media &&
+      loadedSource &&
+      loadedSource !== loadingSource &&
+      this.bufferController.hasSourceTypes()
+    ) {
       this.detachMedia();
       this.attachMedia(media);
     }
-    url = URLToolkit.buildAbsoluteURL(self.location.href, url, {
-      alwaysNormalize: true,
-    });
-    logger.log(`loadSource:${url}`);
-    this.url = url;
     // when attaching to a source URL, trigger a playlist load
     this.trigger(Events.MANIFEST_LOADING, { url: url });
   }
@@ -605,7 +623,7 @@ export default class Hls implements HlsEventEmitter {
 
     const len = levels.length;
     for (let i = 0; i < len; i++) {
-      if (levels[i].maxBitrate > minAutoBitrate) {
+      if (levels[i].maxBitrate >= minAutoBitrate) {
         return i;
       }
     }
@@ -646,12 +664,24 @@ export default class Hls implements HlsEventEmitter {
    * this setter is used to force next auto level.
    * this is useful to force a switch down in auto mode:
    * in case of load error on level N, hls.js can set nextAutoLevel to N-1 for example)
-   * forced value is valid for one fragment. upon succesful frag loading at forced level,
+   * forced value is valid for one fragment. upon successful frag loading at forced level,
    * this value will be resetted to -1 by ABR controller.
    * @type {number}
    */
   set nextAutoLevel(nextLevel: number) {
     this.abrController.nextAutoLevel = Math.max(this.minAutoLevel, nextLevel);
+  }
+
+  /**
+   * get the datetime value relative to media.currentTime for the active level Program Date Time if present
+   * @type {Date}
+   */
+  public get playingDate(): Date | null {
+    return this.streamController.currentProgramDateTime;
+  }
+
+  public get mainForwardBufferInfo(): BufferInfo | null {
+    return this.streamController.getMainFwdBufferInfo();
   }
 
   /**
@@ -790,6 +820,14 @@ export default class Hls implements HlsEventEmitter {
   }
 
   /**
+   * the rate at which the edge of the current live playlist is advancing or 1 if there is none
+   * @type {number}
+   */
+  get drift(): number | null {
+    return this.latencyController.drift;
+  }
+
+  /**
    * set to true when startLoad is called before MANIFEST_PARSED event
    * @type {boolean}
    */
@@ -814,25 +852,34 @@ export type {
   ABRControllerConfig,
   BufferControllerConfig,
   CapLevelControllerConfig,
+  CMCDControllerConfig,
   EMEControllerConfig,
   DRMSystemOptions,
   FPSControllerConfig,
   FragmentLoaderConfig,
+  FragmentLoaderConstructor,
   LevelControllerConfig,
   MP4RemuxerConfig,
   PlaylistLoaderConfig,
+  PlaylistLoaderConstructor,
   StreamControllerConfig,
   LatencyControllerConfig,
+  MetadataControllerConfig,
   TimelineControllerConfig,
   TSDemuxerConfig,
 } from './config';
 export type { CuesInterface } from './utils/cues';
 export type { MediaKeyFunc, KeySystems } from './utils/mediakeys-helper';
+export type { DateRange } from './loader/date-range';
 export type { LoadStats } from './loader/load-stats';
 export type { LevelKey } from './loader/level-key';
 export type { LevelDetails } from './loader/level-details';
 export type { SourceBufferName } from './types/buffer';
-export type { MetadataSample, UserdataSample } from './types/demuxer';
+export type {
+  MetadataSample,
+  MetadataSchema,
+  UserdataSample,
+} from './types/demuxer';
 export type {
   LevelParsed,
   LevelAttributes,
@@ -846,6 +893,7 @@ export type {
   PlaylistContextType,
   PlaylistLoaderContext,
   FragmentLoaderContext,
+  KeyLoaderContext,
   Loader,
   LoaderStats,
   LoaderContext,

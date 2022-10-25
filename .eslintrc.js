@@ -13,6 +13,7 @@ module.exports = {
     __USE_SUBTITLES__: true,
     __USE_ALT_AUDIO__: true,
     __USE_EME_DRM__: true,
+    __USE_CMCD__: true,
   },
   // see https://github.com/standard/eslint-config-standard
   // 'prettier' (https://github.com/prettier/eslint-config-prettier) must be last
@@ -79,7 +80,12 @@ module.exports = {
         'no-unused-vars': 0,
         'no-undef': 0,
         'no-use-before-define': 'off',
-        '@typescript-eslint/no-unused-vars': 'warn',
+        '@typescript-eslint/no-unused-vars': [
+          'warn',
+          {
+            args: 'none',
+          },
+        ],
         '@typescript-eslint/prefer-optional-chain': 2,
         '@typescript-eslint/consistent-type-assertions': [
           2,

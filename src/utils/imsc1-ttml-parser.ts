@@ -13,6 +13,14 @@ const HMSF_REGEX = /^(\d{2,}):(\d{2}):(\d{2}):(\d{2})\.?(\d+)?$/;
 // Time format: hours, minutes, seconds, milliseconds, frames, ticks
 const TIME_UNIT_REGEX = /^(\d*(?:\.\d*)?)(h|m|s|ms|f|t)$/;
 
+const textAlignToLineAlign: Partial<Record<string, LineAlignSetting>> = {
+  left: 'start',
+  center: 'center',
+  right: 'end',
+  start: 'start',
+  end: 'end',
+};
+
 export function parseIMSC1(
   payload: ArrayBuffer,
   initPTS: number,
@@ -25,14 +33,13 @@ export function parseIMSC1(
     errorCallBack(new Error('Could not parse IMSC1 mdat'));
     return;
   }
-  const mdat = results[0];
-  const ttml = utf8ArrayToStr(
-    new Uint8Array(payload, mdat.start, mdat.end - mdat.start)
-  );
+
+  const ttmlList = results.map((mdat) => utf8ArrayToStr(mdat));
+
   const syncTime = toTimescaleFromScale(initPTS, 1, timescale);
 
   try {
-    callBack(parseTTML(ttml, syncTime));
+    ttmlList.forEach((ttml) => callBack(parseTTML(ttml, syncTime)));
   } catch (error) {
     errorCallBack(error);
   }
@@ -97,23 +104,15 @@ function parseTTML(ttml: string, syncTime: number): Array<VTTCue> {
       const region = regionElements[cueElement.getAttribute('region')];
       const style = styleElements[cueElement.getAttribute('style')];
 
-      // TODO: Add regions to track and cue (origin and extend)
-      // These values are hard-coded (for now) to simulate region settings in the demo
-      cue.position = 10;
-      cue.size = 80;
-
       // Apply styles to cue
-      const styles = getTtmlStyles(region, style);
+      const styles = getTtmlStyles(region, style, styleElements);
       const { textAlign } = styles;
       if (textAlign) {
         // cue.positionAlign not settable in FF~2016
-        cue.lineAlign = {
-          left: 'start',
-          center: 'center',
-          right: 'end',
-          start: 'start',
-          end: 'end',
-        }[textAlign];
+        const lineAlign = textAlignToLineAlign[textAlign];
+        if (lineAlign) {
+          cue.lineAlign = lineAlign;
+        }
         cue.align = textAlign as AlignSetting;
       }
       Object.assign(cue, styles);
@@ -135,9 +134,9 @@ function getElementCollection(
   return [];
 }
 
-function collectionToDictionary(
-  elementsWithId: Array<HTMLElement>
-): { [id: string]: HTMLElement } {
+function collectionToDictionary(elementsWithId: Array<HTMLElement>): {
+  [id: string]: HTMLElement;
+} {
   return elementsWithId.reduce((dict, element: HTMLElement) => {
     const id = element.getAttribute('xml:id');
     if (id) {
@@ -161,8 +160,13 @@ function getTextContent(element, trim): string {
   }, '');
 }
 
-function getTtmlStyles(region, style): { [style: string]: string } {
+function getTtmlStyles(
+  region,
+  style,
+  styleElements
+): { [style: string]: string } {
   const ttsNs = 'http://www.w3.org/ns/ttml#styling';
+  let regionStyle = null;
   const styleAttributes = [
     'displayAlign',
     'textAlign',
@@ -177,9 +181,20 @@ function getTtmlStyles(region, style): { [style: string]: string } {
     // 'direction',
     // 'writingMode'
   ];
+
+  const regionStyleName = region?.hasAttribute('style')
+    ? region.getAttribute('style')
+    : null;
+
+  if (regionStyleName && styleElements.hasOwnProperty(regionStyleName)) {
+    regionStyle = styleElements[regionStyleName];
+  }
+
   return styleAttributes.reduce((styles, name) => {
     const value =
-      getAttributeNS(style, ttsNs, name) || getAttributeNS(region, ttsNs, name);
+      getAttributeNS(style, ttsNs, name) ||
+      getAttributeNS(region, ttsNs, name) ||
+      getAttributeNS(regionStyle, ttsNs, name);
     if (value) {
       styles[name] = value;
     }
@@ -188,6 +203,9 @@ function getTtmlStyles(region, style): { [style: string]: string } {
 }
 
 function getAttributeNS(element, ns, name): string | null {
+  if (!element) {
+    return null;
+  }
   return element.hasAttributeNS(ns, name)
     ? element.getAttributeNS(ns, name)
     : null;

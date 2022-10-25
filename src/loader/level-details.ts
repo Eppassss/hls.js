@@ -1,6 +1,7 @@
 import { Part } from './fragment';
 import type { Fragment } from './fragment';
 import type { AttrList } from '../utils/attr-list';
+import type { DateRange } from './date-range';
 
 const DEFAULT_TARGET_DURATION = 10;
 
@@ -13,7 +14,7 @@ export class LevelDetails {
   public fragments: Fragment[];
   public fragmentHint?: Fragment;
   public partList: Part[] | null = null;
-  public initSegment: Fragment | null = null;
+  public dateRanges: Record<string, DateRange>;
   public live: boolean = true;
   public ageHeader: number = 0;
   public advancedDateTime?: number;
@@ -43,9 +44,14 @@ export class LevelDetails {
   public renditionReports?: AttrList[];
   public tuneInGoal: number = 0;
   public deltaUpdateFailed?: boolean;
+  public driftStartTime: number = 0;
+  public driftEndTime: number = 0;
+  public driftStart: number = 0;
+  public driftEnd: number = 0;
 
   constructor(baseUrl) {
     this.fragments = [];
+    this.dateRanges = {};
     this.url = baseUrl;
   }
 
@@ -86,6 +92,15 @@ export class LevelDetails {
       this.targetduration ||
       DEFAULT_TARGET_DURATION
     );
+  }
+
+  get drift(): number {
+    const runTime = this.driftEndTime - this.driftStartTime;
+    if (runTime > 0) {
+      const runDuration = this.driftEnd - this.driftStart;
+      return (runDuration * 1000) / runTime;
+    }
+    return 1;
   }
 
   get edge(): number {

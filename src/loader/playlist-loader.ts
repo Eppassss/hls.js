@@ -12,7 +12,7 @@
 import { Events } from '../events';
 import { ErrorDetails, ErrorTypes } from '../errors';
 import { logger } from '../utils/logger';
-import { parseSegmentIndex } from '../utils/mp4-tools';
+import { parseSegmentIndex, findBox } from '../utils/mp4-tools';
 import M3U8Parser from './m3u8-parser';
 import type { LevelParsed } from '../types/level';
 import type {
@@ -25,7 +25,6 @@ import type {
 } from '../types/loader';
 import { PlaylistContextType, PlaylistLevelType } from '../types/loader';
 import { LevelDetails } from './level-details';
-import { Fragment } from './fragment';
 import type Hls from '../hls';
 import { AttrList } from '../utils/attr-list';
 import type {
@@ -34,6 +33,7 @@ import type {
   ManifestLoadingData,
   TrackLoadingData,
 } from '../types/events';
+import { NetworkComponentAPI } from '../types/component-api';
 
 function mapContextToLevelType(
   context: PlaylistLoaderContext
@@ -64,17 +64,21 @@ function getResponseUrl(
   return url;
 }
 
-class PlaylistLoader {
+class PlaylistLoader implements NetworkComponentAPI {
   private readonly hls: Hls;
   private readonly loaders: {
     [key: string]: Loader<LoaderContext>;
   } = Object.create(null);
 
-  private checkAgeHeader: boolean = true;
-
   constructor(hls: Hls) {
     this.hls = hls;
     this.registerListeners();
+  }
+
+  public startLoad(startPosition: number): void {}
+
+  public stopLoad(): void {
+    this.destroyInternalLoaders();
   }
 
   private registerListeners() {
@@ -148,7 +152,6 @@ class PlaylistLoader {
     data: ManifestLoadingData
   ) {
     const { url } = data;
-    this.checkAgeHeader = true;
     this.load({
       id: null,
       groupId: null,
@@ -520,7 +523,7 @@ class PlaylistLoader {
     // return early after calling load for
     // the SIDX box.
     if (levelDetails.needSidxRanges) {
-      const sidxUrl = (levelDetails.initSegment as Fragment).url as string;
+      const sidxUrl = levelDetails.fragments[0].initSegment?.url as string;
       this.load({
         url: sidxUrl,
         isSidxRequest: true,
@@ -547,10 +550,13 @@ class PlaylistLoader {
     response: LoaderResponse,
     context: PlaylistLoaderContext
   ): void {
-    const sidxInfo = parseSegmentIndex(
-      new Uint8Array(response.data as ArrayBuffer)
-    );
+    const data = new Uint8Array(response.data as ArrayBuffer);
+    const sidxBox = findBox(data, ['sidx'])[0];
     // if provided fragment does not contain sidx, early return
+    if (!sidxBox) {
+      return;
+    }
+    const sidxInfo = parseSegmentIndex(sidxBox);
     if (!sidxInfo) {
       return;
     }
@@ -567,10 +573,12 @@ class PlaylistLoader {
             String(segRefInfo.start)
         );
       }
+      if (frag.initSegment) {
+        const moovBox = findBox(data, ['moov'])[0];
+        const moovEndOffset = moovBox ? moovBox.length : null;
+        frag.initSegment.setByteRange(String(moovEndOffset) + '@0');
+      }
     });
-    (levelDetails.initSegment as Fragment).setByteRange(
-      String(sidxInfo.moovEndOffset) + '@0'
-    );
   }
 
   private handleManifestParsingError(
@@ -686,13 +694,14 @@ class PlaylistLoader {
       return;
     }
 
-    // Avoid repeated browser error log `Refused to get unsafe header "age"` when unnecessary or past attempts failed
-    const checkAgeHeader = this.checkAgeHeader && levelDetails.live;
-    const ageHeader: string | null = checkAgeHeader
-      ? loader.getResponseHeader('age')
-      : null;
-    levelDetails.ageHeader = ageHeader ? parseFloat(ageHeader) : 0;
-    this.checkAgeHeader = !!ageHeader;
+    if (levelDetails.live) {
+      if (loader.getCacheAge) {
+        levelDetails.ageHeader = loader.getCacheAge() || 0;
+      }
+      if (!loader.getCacheAge || isNaN(levelDetails.ageHeader)) {
+        levelDetails.ageHeader = 0;
+      }
+    }
 
     switch (type) {
       case PlaylistContextType.MANIFEST:

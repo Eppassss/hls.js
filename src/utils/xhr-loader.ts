@@ -8,6 +8,8 @@ import type {
 } from '../types/loader';
 import { LoadStats } from '../loader/load-stats';
 
+const AGE_HEADER_LINE_REGEX = /^age:\s*[\d.]+\s*$/m;
+
 class XhrLoader implements Loader<LoaderContext> {
   private xhrSetup: Function | null;
   private requestTimeout?: number;
@@ -17,7 +19,7 @@ class XhrLoader implements Loader<LoaderContext> {
   private callbacks: LoaderCallbacks<LoaderContext> | null = null;
   public context!: LoaderContext;
 
-  public loader: XMLHttpRequest | null = null;
+  private loader: XMLHttpRequest | null = null;
   public stats: LoaderStats;
 
   constructor(config /* HlsConfig */) {
@@ -96,6 +98,13 @@ class XhrLoader implements Loader<LoaderContext> {
       if (!xhr.readyState) {
         xhr.open('GET', context.url, true);
       }
+
+      const headers = this.context.headers;
+      if (headers) {
+        for (const header in headers) {
+          xhr.setRequestHeader(header, headers[header]);
+        }
+      }
     } catch (e) {
       // IE11 throws an exception on xhr.open if attempting to access an HTTP resource over HTTPS
       this.callbacks!.onError(
@@ -170,17 +179,22 @@ class XhrLoader implements Loader<LoaderContext> {
           }
           stats.loaded = stats.total = len;
 
-          const onProgress = this.callbacks!.onProgress;
+          if (!this.callbacks) {
+            return;
+          }
+          const onProgress = this.callbacks.onProgress;
           if (onProgress) {
             onProgress(stats, context, data, xhr);
           }
-
+          if (!this.callbacks) {
+            return;
+          }
           const response = {
             url: xhr.responseURL,
             data: data,
           };
 
-          this.callbacks!.onSuccess(response, stats, context, xhr);
+          this.callbacks.onSuccess(response, stats, context, xhr);
         } else {
           // if max nb of retries reached or if http status between 400 and 499 (such error cannot be recovered, retrying is useless), return error
           if (
@@ -244,15 +258,16 @@ class XhrLoader implements Loader<LoaderContext> {
     }
   }
 
-  getResponseHeader(name: string): string | null {
-    if (this.loader) {
-      try {
-        return this.loader.getResponseHeader(name);
-      } catch (error) {
-        /* Could not get headers */
-      }
+  getCacheAge(): number | null {
+    let result: number | null = null;
+    if (
+      this.loader &&
+      AGE_HEADER_LINE_REGEX.test(this.loader.getAllResponseHeaders())
+    ) {
+      const ageHeader = this.loader.getResponseHeader('age');
+      result = ageHeader ? parseFloat(ageHeader) : null;
     }
-    return null;
+    return result;
   }
 }
 

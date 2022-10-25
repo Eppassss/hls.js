@@ -1,4 +1,4 @@
-# API
+# HLS.js v1 API
 
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
@@ -19,6 +19,7 @@
   - [`Hls.DefaultConfig get/set`](#hlsdefaultconfig-getset)
   - [`capLevelToPlayerSize`](#capleveltoplayersize)
   - [`capLevelOnFPSDrop`](#caplevelonfpsdrop)
+  - [`ignoreDevicePixelRatio`](#ignoreDevicePixelRatio)
   - [`debug`](#debug)
   - [`autoStartLoad`](#autostartload)
   - [`startPosition`](#startposition)
@@ -65,7 +66,11 @@
   - [`capLevelController`](#capLevelController)
   - [`fpsController`](#fpsController)
   - [`timelineController`](#timelinecontroller)
+  - [`enableDateRangeMetadataCues`](#enabledaterangemetadatacues)
+  - [`enableEmsgMetadataCues`](#enableemsgmetadatacues)
+  - [`enableID3MetadataCues`](#enableid3metadatacues)
   - [`enableWebVTT`](#enablewebvtt)
+  - [`enableIMSC1`](#enableimsc1)
   - [`enableCEA708Captions`](#enablecea708captions)
   - [`captionsTextTrack1Label`](#captionstexttrack1label)
   - [`captionsTextTrack1LanguageCode`](#captionstexttrack1languagecode)
@@ -92,6 +97,7 @@
   - [`licenseResponseCallback`](#licenseResponseCallback)
   - [`drmSystemOptions`](#drmSystemOptions)
   - [`requestMediaKeySystemAccessFunc`](#requestMediaKeySystemAccessFunc)
+  - [`cmcd`](#cmcd)
 - [Video Binding/Unbinding API](#video-bindingunbinding-api)
   - [`hls.attachMedia(videoElement)`](#hlsattachmediavideoelement)
   - [`hls.detachMedia()`](#hlsdetachmedia)
@@ -126,8 +132,10 @@
   - [`hls.latency`](#hlslatency)
   - [`hls.maxLatency`](#hlsmaxlatency)
   - [`hls.targetLatency`](#hlstargetlatency)
+  - [`hls.drift`](#hlsdrift)
+  - [`hls.playingDate`](#hlsplayingdate)
 - [Runtime Events](#runtime-events)
-- [Loader Composition](#loader-composition)
+- [Creating a Custom Loader](#creating-a-custom-loader)
 - [Errors](#errors)
   - [Network Errors](#network-errors)
   - [Media Errors](#media-errors)
@@ -199,17 +207,17 @@ You need to provide manifest URL as below:
   if (Hls.isSupported()) {
     var video = document.getElementById('video');
     var hls = new Hls();
-    // bind them together
-    hls.attachMedia(video);
     hls.on(Hls.Events.MEDIA_ATTACHED, function () {
       console.log('video and hls.js are now bound together !');
-      hls.loadSource('http://my.streamURL.com/playlist.m3u8');
-      hls.on(Hls.Events.MANIFEST_PARSED, function (event, data) {
-        console.log(
-          'manifest loaded, found ' + data.levels.length + ' quality level'
-        );
-      });
     });
+    hls.on(Hls.Events.MANIFEST_PARSED, function (event, data) {
+      console.log(
+        'manifest loaded, found ' + data.levels.length + ' quality level'
+      );
+    });
+    hls.loadSource('http://my.streamURL.com/playlist.m3u8');
+    // bind them together
+    hls.attachMedia(video);
   }
 </script>
 ```
@@ -367,6 +375,9 @@ var config = {
   capLevelController: CapLevelController,
   fpsController: FPSController,
   timelineController: TimelineController,
+  enableDateRangeMetadataCues: true,
+  enableEmsgMetadataCues: true,
+  enableID3MetadataCues: true,
   enableWebVTT: true,
   enableIMSC1: true,
   enableCEA708Captions: true,
@@ -387,6 +398,7 @@ var config = {
   licenseXhrSetup: undefined,
   drmSystemOptions: {},
   requestMediaKeySystemAccessFunc: requestMediaKeySystemAccess,
+  cmcd: undefined,
 };
 
 var hls = new Hls(config);
@@ -413,6 +425,13 @@ This configuration will be applied by default to all instances.
   then the quality level is dropped and capped at this lower level.
 - when set to false, levels will not be limited. All available levels could be used in auto-quality mode taking only bandwidth into consideration.
 
+### `ignoreDevicePixelRatio`
+
+(default: `false`)
+
+- when set to true, calculations related to player size will ignore browser `devicePixelRatio`.
+- when set to false, calculations related to player size will respect browser `devicePixelRatio`.
+
 ### `debug`
 
 (default: `false`)
@@ -433,7 +452,7 @@ A logger object could also be provided for custom logging: `config.debug = custo
 (default -1)
 
 - if set to -1, playback will start from initialTime=0 for VoD and according to `liveSyncDuration/liveSyncDurationCount` config params for Live
-- Otherwise, playback will start from predefined value. (unless stated otherwise in `autoStartLoad=false` mode : in that case startPosition can be overrided using `hls.startLoad(startPosition)`).
+- Otherwise, playback will start from predefined value. (unless stated otherwise in `autoStartLoad=false` mode : in that case startPosition can be overridden using `hls.startLoad(startPosition)`).
 
 ### `defaultAudioCodec`
 
@@ -671,7 +690,7 @@ Start prefetching start fragment although media not attached yet.
 
 (default: `true`)
 
-Load the first fragment of the lowest level to establish a bandwidth estimate before selecting the first auto-level.
+You must also set `startLevel = -1` for this to have any impact. Otherwise, hls.js will load the first level in the manifest and start playback from there. If you do set `startLevel = -1`, a fragment of the lowest level will be downloaded to establish a bandwidth estimate before selecting the first auto-level.
 Disable this test if you'd like to provide your own estimate or use the default `abrEwmaDefaultEstimate`.
 
 ### `progressive`
@@ -809,7 +828,7 @@ var customPlaylistLoader = function () {
 };
 ```
 
-if you want to just make slight adjustements to existing loader implementation, you can also eventually override it, see an example below :
+if you want to just make slight adjustments to existing loader implementation, you can also eventually override it, see an example below :
 
 ```js
 // special playlist post processing function
@@ -921,17 +940,49 @@ Enable the default fps controller by setting `capLevelOnFPSDrop` to `true`.
 
 (default: internal track timeline controller)
 
-Customized text track syncronization controller.
+Customized text track synchronization controller.
 
 Parameter should be a class with a `destroy()` method:
 
 - `destroy()` : should clean-up all used resources
+
+### `enableDateRangeMetadataCues`
+
+(default: `true`)
+
+whether or not to add, update, and remove cues from the metadata TextTrack for EXT-X-DATERANGE playlist tags
+
+parameter should be a boolean
+
+### `enableEmsgMetadataCues`
+
+(default: `true`)
+
+whether or not to add, update, and remove cues from the metadata TextTrack for ID3 Timed Metadata found in CMAF Event Message (emsg) boxes
+
+parameter should be a boolean
+
+### `enableID3MetadataCues`
+
+(default: `true`)
+
+whether or not to add, update, and remove cues from the metadata TextTrack for ID3 Timed Metadata found in audio and MPEG-TS containers
+
+parameter should be a boolean
 
 ### `enableWebVTT`
 
 (default: `true`)
 
 whether or not to enable WebVTT captions on HLS
+
+parameter should be a boolean
+
+### `enableIMSC1`
+
+(default: `true`)
+
+whether or not to enable IMSC1 captions on HLS
 
 parameter should be a boolean
 
@@ -1125,6 +1176,20 @@ The Widevine license server URL.
 
 A pre-processor function for modifying the `XMLHttpRequest` and request url (using `xhr.open`) prior to sending the license request.
 
+```js
+var config = {
+  licenseXhrSetup: function (xhr, url) {
+    xhr.withCredentials = true; // do send cookies
+    if (!xhr.readyState) {
+      // Call open to change the method (default is POST) or modify the url
+      xhr.open('GET', url, true);
+      // Append headers after opening
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    }
+  },
+};
+```
+
 ### `licenseResponseCallback`
 
 (default: `undefined`, type `(xhr: XMLHttpRequest, url: string) => data: ArrayBuffer`)
@@ -1152,6 +1217,15 @@ With the default argument, `''` will be specified for each option (_i.e. no spec
 
 Allows for the customization of `window.navigator.requestMediaKeySystemAccess`.
 
+### `cmcd`
+
+When the `cmcd` object is defined, [Common Media Client Data (CMCD)](https://cdn.cta.tech/cta/media/media/resources/standards/pdfs/cta-5004-final.pdf)
+data will be passed on all media requests (manifests, playlists, a/v segments, timed text). It's configuration values are:
+
+- `sessionId`: The CMCD session id. One will be automatically generated if none is provided.
+- `contentId`: The CMCD content id.
+- `useHeaders`: Send CMCD data in request headers instead of as query args. Defaults to `false`.
+
 ## Video Binding/Unbinding API
 
 ### `hls.attachMedia(videoElement)`
@@ -1177,7 +1251,7 @@ Calling this method will:
 ## Quality switch Control API
 
 By default, hls.js handles quality switch automatically, using heuristics based on fragment loading bitrate and quality level bandwidth exposed in the variant manifest.
-It is also possible to manually control quality swith using below API.
+It is also possible to manually control quality switch using below API.
 
 ### `hls.levels`
 
@@ -1217,7 +1291,7 @@ Set to `-1` for automatic level selection.
 ### `hls.startLevel`
 
 - get/set: Start level index (level of first fragment that will be played back).
-  - if not overrided by user: first level appearing in manifest will be used as start level.
+  - if not overridden by user: first level appearing in manifest will be used as start level.
   - if -1: automatic start level selection, playback will start from level matching download bandwidth (determined from download of first segment).
 
 Default value is `hls.firstLevel`.
@@ -1304,7 +1378,9 @@ get/set : if set to true the active subtitle track mode will be set to `showing`
 
 ### `hls.liveSyncPosition`
 
-get : position of live sync point (ie edge of live position minus safety delay defined by `hls.config.liveSyncDuration`)
+get : position of live sync point (ie edge of live position minus safety delay defined by `hls.config.liveSyncDuration`).
+If playback stalls outside the sliding window, or latency exceeds `liveMaxLatencyDuration` hls.js will seek ahead to
+`liveSyncPosition` to get back in sync with the stream stream.
 
 ### `hls.latency`
 
@@ -1320,6 +1396,14 @@ returns 0 before first playlist is loaded
 ### `hls.targetLatency`
 
 get : target distance from the edge as calculated by the latency controller
+
+### `hls.drift`
+
+get : the rate at which the edge of the current live playlist is advancing or 1 if there is none
+
+### `hls.playingDate`
+
+get: the datetime value relative to media.currentTime for the active level Program Date Time if present
 
 ## Runtime Events
 
@@ -1341,7 +1425,7 @@ Full list of Events is available below:
 
 - `Hls.Events.MEDIA_ATTACHING` - fired before MediaSource is attaching to media element
   - data: { media }
-- `Hls.Events.MEDIA_ATTACHED` - fired when MediaSource has been succesfully attached to media element
+- `Hls.Events.MEDIA_ATTACHED` - fired when MediaSource has been successfully attached to media element
   - data: { media }
 - `Hls.Events.MEDIA_DETACHING` - fired before detaching MediaSource from media element
   - data: { }
@@ -1377,11 +1461,11 @@ Full list of Events is available below:
 - `Hls.Events.LEVEL_LOADING` - fired when a level playlist loading starts
   - data: { url : level URL, level : id of level being loaded, deliveryDirectives: LL-HLS delivery directives or `null` when blocking reload is not supported }
 - `Hls.Events.LEVEL_LOADED` - fired when a level playlist loading finishes
-  - data: { details : `levelDetails` object (please see [below](#leveldetails) for more information), level : id of loaded level, stats : [LoadStats] }
+  - data: { details : [LevelDetails](#leveldetails), level : id of loaded level, stats : [LoadStats] }
 - `Hls.Events.LEVEL_UPDATED` - fired when a level's details have been updated based on previous details, after it has been loaded
-  - data: { details : `levelDetails` object (please see [below](#leveldetails) for more information), level : id of updated level }
+  - data: { details : [LevelDetails](#leveldetails), level : id of updated level }
 - `Hls.Events.LEVEL_PTS_UPDATED` - fired when a level's PTS information has been updated after parsing a fragment
-  - data: { details : `levelDetails` object (please see [below](#leveldetails) for more information), level : id of updated level, drift: PTS drift observed when parsing last fragment, type, start, end }
+  - data: { details : [LevelDetails](#leveldetails), level : id of updated level, drift: PTS drift observed when parsing last fragment, type, start, end }
 - `Hls.Events.LEVELS_UPDATED` - fired when a level is removed after calling `removeLevel()`
   - data: { levels : [ available quality levels ] }
 - `Hls.Events.AUDIO_TRACKS_UPDATED` - fired to notify that audio track lists has been updated
@@ -1393,7 +1477,7 @@ Full list of Events is available below:
 - `Hls.Events.AUDIO_TRACK_LOADING` - fired when an audio track loading starts
   - data: { url : audio track URL, id : audio track id }
 - `Hls.Events.AUDIO_TRACK_LOADED` - fired when an audio track loading finishes
-  - data: { details : `levelDetails` object (please see [below](#leveldetails) for more information), id : audio track id, stats : [LoadStats] }
+  - data: { details : [LevelDetails](#leveldetails), id : audio track id, stats : [LoadStats] }
 - `Hls.Events.SUBTITLE_TRACKS_UPDATED` - fired to notify that subtitle track lists has been updated
   - data: { subtitleTracks : subtitleTracks }
 - `Hls.Events.SUBTITLE_TRACK_SWITCH` - fired when a subtitle track switch occurs
@@ -1401,7 +1485,7 @@ Full list of Events is available below:
 - `Hls.Events.SUBTITLE_TRACK_LOADING` - fired when a subtitle track loading starts
   - data: { url : audio track URL, id : audio track id }
 - `Hls.Events.SUBTITLE_TRACK_LOADED` - fired when a subtitle track loading finishes
-  - data: { details : `levelDetails` object (please see [below](#leveldetails) for more information), id : subtitle track id, stats : [LoadStats] }
+  - data: { details : [LevelDetails](#leveldetails), id : subtitle track id, stats : [LoadStats] }
 - `Hls.Events.SUBTITLE_FRAG_PROCESSED` - fired when a subtitle fragment has been processed
   - data: { success : boolean, frag : [the processed fragment object], error?: [error parsing subtitles if any] }
 - `Hls.Events.INIT_PTS_FOUND` - fired when the first timestamp is found
@@ -1418,9 +1502,9 @@ Full list of Events is available below:
 - `Hls.Events.FRAG_PARSING_INIT_SEGMENT` - fired when Init Segment has been extracted from fragment
   - data: { id: demuxer id, frag : fragment object, moov : moov MP4 box, codecs : codecs found while parsing fragment }
 - `Hls.Events.FRAG_PARSING_USERDATA` - fired when parsing sei text is completed
-  - data: { id : demuxer id, frag: fragment object, samples : [ sei samples pes ] }
-- `Hls.Events.FRAG_PARSING_METADATA` - fired when parsing id3 is completed
-  - data: { id: demuxer id, frag : fragment object, samples : [ id3 pes - pts and dts timestamp are relative, values are in seconds] }
+  - data: { id : demuxer id, frag: fragment object, samples : [ sei samples pes ], details: [LevelDetails](#leveldetails) }
+- `Hls.Events.FRAG_PARSING_METADATA` - fired when parsing ID3 is completed
+  - data: { id: demuxer id, frag : fragment object, samples : [ ID3 pes - pts and dts timestamp are relative, values are in seconds], details: [LevelDetails](#leveldetails) }
 - `Hls.Events.FRAG_PARSING_DATA` - [deprecated]
 - `Hls.Events.FRAG_PARSED` - fired when fragment parsing is completed
   - data: { frag : fragment object, partIndex }
@@ -1446,18 +1530,25 @@ Full list of Events is available below:
 - `Hls.Events.CUES_PARSED` - When `renderTextTracksNatively` is `false`, this event will fire when new captions or subtitle cues are parsed.
   - data: { type, cues, track } }
 
-## Loader Composition
+## Creating a Custom Loader
 
-You can export internal loader definition for your own implementation via static getter `Hls.DefaultConfig.loader`.
+You can use the internal loader definition for your own implementation via the static getter `Hls.DefaultConfig.loader`.
 
 Example:
 
 ```js
-import Hls from 'hls.js';
-
 let myHls = new Hls({
   pLoader: function (config) {
     let loader = new Hls.DefaultConfig.loader(config);
+
+    Object.defineProperties(this, {
+      stats: {
+        get: () => loader.stats,
+      },
+      context: {
+        get: () => loader.context,
+      },
+    });
 
     this.abort = () => loader.abort();
     this.destroy = () => loader.destroy();
@@ -1470,6 +1561,24 @@ let myHls = new Hls({
 
       loader.load(context, config, callbacks);
     };
+  },
+});
+```
+
+Alternatively, environments that support ES6 classes can extends the loader directly:
+
+```js
+import Hls from 'hls.js';
+
+let myHls = new Hls({
+  pLoader: class CustomLoader extends Hls.DefaultConfig.loader {
+    load(context, config, callbacks) {
+      let { type, url } = context;
+
+      // Custom behavior
+
+      super.load(context, config, callbacks);
+    }
   },
 });
 ```
@@ -1514,7 +1623,9 @@ Full list of errors is described below:
 - `Hls.ErrorDetails.FRAG_PARSING_ERROR` - raised when fragment parsing fails
   - data: { type : `MEDIA_ERROR`, details : `Hls.ErrorDetails.FRAG_PARSING_ERROR`, fatal : `true` or `false`, reason : failure reason }
 - `Hls.ErrorDetails.BUFFER_ADD_CODEC_ERROR` - raised when MediaSource fails to add new sourceBuffer
-  - data: { type : `MEDIA_ERROR`, details : `Hls.ErrorDetails.BUFFER_ADD_CODEC_ERROR`, fatal : `false`, err : error raised by MediaSource, mimeType: mimeType on which the failure happened }
+  - data: { type : `MEDIA_ERROR`, details : `Hls.ErrorDetails.BUFFER_ADD_CODEC_ERROR`, fatal : `false`, error : error raised by MediaSource, mimeType: mimeType on which the failure happened }
+- `Hls.ErrorDetails.BUFFER_INCOMPATIBLE_CODECS_ERROR` - raised when no MediaSource(s) could be created based on track codec(s)
+  - data: { type : `MEDIA_ERROR`, details : `Hls.ErrorDetails.BUFFER_INCOMPATIBLE_CODECS_ERROR`, fatal : `true`, reason : failure reason }
 - `Hls.ErrorDetails.BUFFER_APPEND_ERROR` - raised when exception is raised while calling buffer append
   - data: { type : `MEDIA_ERROR`, details : `Hls.ErrorDetails.BUFFER_APPEND_ERROR`, fatal : `true` or `false`, parent : parent stream controller }
 - `Hls.ErrorDetails.BUFFER_APPENDING_ERROR` - raised when exception is raised during buffer appending

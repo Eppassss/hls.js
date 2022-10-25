@@ -134,7 +134,8 @@ class EMEController implements ComponentAPI {
     this._licenseXhrSetup = this._config.licenseXhrSetup;
     this._licenseResponseCallback = this._config.licenseResponseCallback;
     this._emeEnabled = this._config.emeEnabled;
-    this._requestMediaKeySystemAccess = this._config.requestMediaKeySystemAccessFunc;
+    this._requestMediaKeySystemAccess =
+      this._config.requestMediaKeySystemAccessFunc;
     this._drmSystemOptions = this._config.drmSystemOptions;
 
     this._registerListeners();
@@ -275,7 +276,8 @@ class EMEController implements ComponentAPI {
     this._mediaKeysList.forEach((mediaKeysListItem) => {
       if (!mediaKeysListItem.mediaKeysSession) {
         // mediaKeys is definitely initialized here
-        mediaKeysListItem.mediaKeysSession = mediaKeysListItem.mediaKeys!.createSession();
+        mediaKeysListItem.mediaKeysSession =
+          mediaKeysListItem.mediaKeys!.createSession();
         this._onNewMediaKeySession(mediaKeysListItem.mediaKeysSession);
       }
     });
@@ -314,7 +316,9 @@ class EMEController implements ComponentAPI {
           data ? data.byteLength : data
         }), updating key-session`
       );
-      keySession.update(data);
+      keySession.update(data).catch((err) => {
+        logger.warn(`Updating key-session failed: ${err}`);
+      });
     });
   }
 
